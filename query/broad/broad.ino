@@ -2,8 +2,51 @@
 #include <XBee.h>
 #include <stdio.h>
 
-#define TARGET (XBeeAddress64(0x0, 0xffff))
+#define TARGET (XBeeAddress64(0x0, 0x0))
 XBee xbee = XBee();
+
+void xbee_at_cmd(const String& line)
+{
+  Serial1.print(line);
+  Serial1.write('\r');
+  Serial1.flush();
+    
+  while(!Serial1.available());
+  auto resp = Serial1.readStringUntil('\r');
+
+  Serial.print(line);
+  Serial.print(" => ");
+  Serial.println(resp);
+}
+
+void xbee_start()
+{
+  static bool done = false;
+  if(!done)
+  {
+    delay(2000);
+    Serial.println("-- DISCARD");
+    Serial.println("-- DISCARD");
+    Serial.println("-- DISCARD");
+    Serial.println("Running XBee initialization procedure.");
+    
+    delay(1200);
+    Serial1.write("+++");
+    Serial1.flush();
+    delay(1200);
+    while(!Serial1.available());
+    auto resp = Serial1.readStringUntil('\r');
+    
+    Serial.print("+++ => ");
+    Serial.println(resp);
+
+    xbee_at_cmd("ATCH 0B");
+    xbee_at_cmd("ATAP 02");
+    xbee_at_cmd("ATCN");
+
+    done = true;
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -13,9 +56,10 @@ void setup() {
 }
 
 void loop() {
-  uint8_t data[] = { 0x0, 0xffff };
+  xbee_start();
+  uint8_t data[] = { 0xe6, 0x21 };
   auto address = TARGET;
-  auto packet = Tx64Request(address, data, sizeof(data));
+  auto packet = Tx16Request(BROADCAST_ADDRESS, data, sizeof(data));
 
   char str[128];
 
@@ -35,5 +79,5 @@ void loop() {
   }
   Serial.flush();
   
-  delay(1000);
+  delay(100);
 }
