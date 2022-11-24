@@ -2,52 +2,126 @@
 #include <XBee.h>
 #include <stdio.h>
 
-#define RSSI_A (18.0)
-#define RSSI_N (2.0)
+#define ADDRESS ("6969")
 
-#define BEACON0 (XBeeAddress64(0x8877665544, 0x33221100))
-#define BEACON1 (XBeeAddress64(0x8877665544, 0x33221100))
-#define BEACON2 (XBeeAddress64(0x8877665544, 0x33221100))
+#define EWMA_F (0.5f)
 
-#define BEACON0_POS (Vec2f{.x = 0.0, .y = 1.0})
-#define BEACON1_POS (Vec2f{.x = 0.0, .y = 0.0})
-#define BEACON2_POS (Vec2f{.x = 1.0, .y = 0.0})
+#define BEACON0 (0x4200)
+#define BEACON1 (0x4201)
+#define BEACON2 (0x4202)
+
+static float rssi_a[] = 
+{
+  -67.0f,
+  -75.0f,
+  -68.0f
+};
+
+static float rssi_n[] =
+{
+  1.0f,
+  1.0f,
+  1.0f
+};
+
+#define BEACON0_POS (Vec2f{.x = -1.0, .y = 1.0})
+#define BEACON1_POS (Vec2f{.x = 1.0, .y = 1.0})
+#define BEACON2_POS (Vec2f{.x = -1.0, .y = -1.0})
 
 struct Vec2f
 {
   float x;
   float y;
-}
+};
 
 struct
 {
-  uint8_t beacon0;
-  uint8_t beacon1;
-  uint8_t beacon2;
+  float beacon0;
+  float beacon1;
+  float beacon2;
 
   uint8_t init;
   
 } rssi;
-XBee *xbee;
+
+XBee xbee = XBee();
+
+void xbee_at_cmd(const String& line)
+{
+  Serial1.print(line);
+  Serial1.write('\r');
+  Serial1.flush();
+    
+  while(!Serial1.available());
+  auto resp = Serial1.readStringUntil('\r');
+
+  Serial.print(line);
+  Serial.print(" => ");
+  Serial.println(resp);
+}
+
+void xbee_start(const char *addr_hex)
+{
+  static bool done = false;
+  
+  char target[64];
+  snprintf(target, sizeof(target), "ATMY %s", addr_hex);
+  
+  if(!done)
+  {
+    delay(2000);
+    Serial.println("-- DISCARD");
+    Serial.println("-- DISCARD");
+    Serial.println("-- DISCARD");
+    Serial.println("Running XBee initialization procedure.");
+    
+    delay(1200);
+    Serial1.write("+++");
+    Serial1.flush();
+    delay(1200);
+    while(!Serial1.available());
+    auto resp = Serial1.readStringUntil('\r');
+    
+    Serial.print("+++ => ");
+    Serial.println(resp);
+
+    xbee_at_cmd("ATCH 0B");
+    xbee_at_cmd("ATAP 01");
+    xbee_at_cmd("ATID E621");
+    xbee_at_cmd(target);
+    xbee_at_cmd("ATMM 00");
+    xbee_at_cmd("ATRR 00");
+    xbee_at_cmd("ATNT 19");
+    xbee_at_cmd("ATCE 00");
+    xbee_at_cmd("ATSC 1FFE");
+    xbee_at_cmd("ATNT 19");
+    xbee_at_cmd("ATSD 04");
+    xbee_at_cmd("ATA1 00");
+    xbee_at_cmd("ATA2 00");
+    xbee_at_cmd("ATEE 00");
+    xbee_at_cmd("ATCN");
+
+    done = true;
+  }
+}
 
 void setup() {
-  Serial.begin(9800);
+  Serial.begin(115200);
+  Serial1.begin(9600);
   
-  xbee = new XBee();
   rssi.beacon0 = 0;
   rssi.beacon1 = 0;
   rssi.beacon2 = 0;
   rssi.init = 0;
   
-  xbee->begin(Serial1);
+  xbee.setSerial(Serial1);
 }
 
-float d(uint8_t rssi)
+float d(float rssi, unsigned int index)
 {
-  float base = 1.0;
-  float exponent = ((float)rssi + RSSI_A) / 10.0 * RSSI_N;
-
-  return exp(10.0, exponent);
+  float base = 1.0f;
+  float exponent = (-(float)rssi - rssi_a[index]) / -(10.0f * rssi_n[index]);
+  return pow(10.0f, exponent);
 }
 
 float a(const Vec2f& v0, const Vec2f& v1)
@@ -62,9 +136,9 @@ float b(const Vec2f& v0, float r0, const Vec2f& v1, float r1)
 
 Vec2f position()
 {
-  auto beacon0 = d(rssi.beacon0);
-  auto beacon1 = d(rssi.beacon1);
-  auto beacon2 = d(rssi.beacon2);
+  auto beacon0 = d(rssi.beacon0, 0);
+  auto beacon1 = d(rssi.beacon1, 1);
+  auto beacon2 = d(rssi.beacon2, 2);
 
   /**
    * To make the trilateration, we intersect the three radii
@@ -142,40 +216,54 @@ Vec2f position()
 }
 
 void loop() {
-  if(xbee->readPacket(1000))
+  xbee_start(ADDRESS);
+  if(xbee.readPacket(1000))
   {
-    if(xbee->getResponse().getApiId() == Rx64Response::API_ID)
+    if(xbee.getResponse().getApiId() == Rx16Response::API_ID)
     {
-      Rx64Response response;
-      xbee->getResponse().getRx64Response(response);
+      Rx16Response response;
+      xbee.getResponse().getRx16Response(response);
 
-      auto address = response.getRemoteAddress64();
+      auto address = response.getRemoteAddress16();
       if(address == BEACON0)
       {
-        rssi.beacon0 = response.getRssi();
+        Serial.print("[BEACON0] ");
+        rssi.beacon0 = rssi.beacon0 * (1.0f - EWMA_F) + response.getRssi() * EWMA_F;
         rssi.init |= 1;
+        Serial.print(rssi.beacon0);
+        Serial.print(" / ");
+        Serial.print(d(rssi.beacon0, 0));
+        Serial.print(" ||| ");
       }
       else if(address == BEACON1)
       {
-        rssi.beacon1 = response.getRssi();
+        Serial.print("[BEACON1] ");
+        rssi.beacon1 = rssi.beacon1 * (1.0f - EWMA_F) + response.getRssi() * EWMA_F;
         rssi.init |= 2;
+        Serial.print(rssi.beacon1);
+        Serial.print(" / ");
+        Serial.print(d(rssi.beacon1, 1));
+        Serial.print(" ||| ");
       }
       else if(address == BEACON2)
       {
-        rssi.beacon2 = response.getRssi();
+        Serial.print("[BEACON2] ");
+        rssi.beacon2 = rssi.beacon2 * (1.0f - EWMA_F) + response.getRssi() * EWMA_F;
         rssi.init |= 4;
+        Serial.print(rssi.beacon2);
+        Serial.print(" / ");
+        Serial.print(d(rssi.beacon2, 2));
+        Serial.print(" ||| ");
       }
-
-      Serial.print("Received beacon packet");
     }
   }
 
   if(rssi.init == 7)
   {
-    char message[20];
     Vec2f pos = position();
 
-    snprintf(message, sizeof(message), "Coordinates: (%f, %f)", pos.x, pos.y);
-    Serial.print(message);
+    Serial.print(pos.x);
+    Serial.print(", ");
+    Serial.println(pos.y);
   }
 }
